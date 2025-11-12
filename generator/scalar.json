@@ -1,0 +1,25 @@
+{
+  "DateTime": {
+    "pkg": "time",
+    "type": "Time",
+    "is_ptr": true
+  },
+  "UUID": {
+    "type": "string"
+  },
+  "BigDecimal": {
+    "pkg": "decimal",
+    "type": "Decimal"
+  },
+  "ScalarDateTime": {
+    "pkg": "time",
+    "type": "Time",
+    "is_ptr": true
+  },
+  "ScalarInt": {
+    "type": "int64"
+  },
+  "ScalarJson": {
+    "type": "interface{}"
+  }
+}
