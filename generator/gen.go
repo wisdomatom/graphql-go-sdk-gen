@@ -243,6 +243,7 @@ func Generate(conf *GenerateConfig) error {
 	}
 
 	genGraphQLError(fClient)
+	genClient(fClient)
 	genDo(fClient)
 	genNewField(fClient)
 	genBuildFunc(fClient)
@@ -290,10 +291,10 @@ func genNewField(f *jen.File) {
 }
 
 func genDo(f *jen.File) {
-	f.Func().Id("do").
-		Params(jen.Id("endpoint").Id("string"), jen.Id("token").Id("string"), jen.Id("query").Id("string"), jen.Id("vars").Map(jen.String()).Interface(), jen.Id("resp").Interface()).
+	f.Func().Params(jen.Id("c").Op("*").Id("Client")).Id("Do").
+		Params(jen.Id("ctx").Qual("context", "Context"), jen.Id("query").String(), jen.Id("vars").Map(jen.String()).Interface(), jen.Id("resp").Interface()).
 		Params(jen.Error()).Block(
-		jen.Id("bts").Op(",").Id("err").Op(":=").Id("doGraphQLRequest").Call(jen.Id("endpoint"), jen.Id("token"), jen.Id("query"), jen.Id("vars")),
+		jen.Id("bts").Op(",").Id("err").Op(":=").Id("doGraphQLRequest").Call(jen.Id("ctx"), jen.Id("c").Dot("HTTPClient"), jen.Id("c").Dot("Endpoint"), jen.Id("query"), jen.Id("vars")),
 		jen.If(jen.Id("bts").Op("==").Nil()).Block(
 			jen.Return(jen.Id("fmt").Dot("Errorf").Call(jen.Lit("doGraphQLRequest failed: %w"), jen.Id("err"))),
 		),
@@ -318,6 +319,33 @@ func genGraphQLError(f *jen.File) {
 				jen.Return(jen.Id("fmt").Dot("Errorf").Call(jen.Lit("graphql errors: %v"), jen.Id("err"))),
 			),
 			jen.Return(jen.Nil()),
+		)
+}
+
+func genClient(f *jen.File) {
+	f.Comment("Client is the default client for GraphQL.")
+	f.Type().Id("Client").Struct(
+		jen.Id("Endpoint").String(),
+		jen.Id("HTTPClient").Op("*").Qual("net/http", "Client"),
+	)
+	f.Line()
+	f.Comment("NewClient creates a new GraphQL client.")
+	f.Func().Id("NewClient").
+		Params(
+			jen.Id("endpoint").String(),
+			jen.Id("httpClient").Op("*").Qual("net/http", "Client"),
+		).
+		Op("*").Id("Client").
+		Block(
+			jen.If(jen.Id("httpClient").Op("==").Nil()).Block(
+				jen.Id("httpClient").Op("=").Qual("net/http", "DefaultClient"),
+			),
+			jen.Return(jen.Op("&").Id("Client").Values(
+				jen.Dict{
+					jen.Id("Endpoint"):   jen.Id("endpoint"),
+					jen.Id("HTTPClient"): jen.Id("httpClient"),
+				},
+			)),
 		)
 }
 
@@ -598,7 +626,7 @@ func genFieldHelpers(f *jen.File) {
 	f.Line()
 
 	// doGraphQLRequest helper
-	f.Func().Id("doGraphQLRequest").Params(jen.Id("endpoint"), jen.Id("token").String(), jen.Id("query").String(), jen.Id("variables").Map(jen.String()).Interface()).Params(jen.Index().Byte(), jen.Error()).Block(
+	f.Func().Id("doGraphQLRequest").Params(jen.Id("ctx").Qual("context", "Context"), jen.Id("client").Op("*").Qual("net/http", "Client"), jen.Id("endpoint").String(), jen.Id("query").String(), jen.Id("variables").Map(jen.String()).Interface()).Params(jen.Index().Byte(), jen.Error()).Block(
 		jen.Id("payload").Op(":=").Map(jen.String()).Interface().Values(
 			jen.Dict{
 				jen.Lit("query"):     jen.Id("query"),
@@ -607,11 +635,10 @@ func genFieldHelpers(f *jen.File) {
 		),
 		jen.Id("bts").Op(",").Id("err").Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("payload")),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(jen.Return(jen.Nil(), jen.Id("err"))),
-		jen.Id("req").Op(",").Id("err").Op(":=").Qual("net/http", "NewRequest").Call(jen.Qual("net/http", "MethodPost"), jen.Id("endpoint"), jen.Qual("bytes", "NewBuffer").Call(jen.Id("bts"))),
+		jen.Id("req").Op(",").Id("err").Op(":=").Qual("net/http", "NewRequestWithContext").Call(jen.Id("ctx"), jen.Qual("net/http", "MethodPost"), jen.Id("endpoint"), jen.Qual("bytes", "NewBuffer").Call(jen.Id("bts"))),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(jen.Return(jen.Nil(), jen.Id("err"))),
 		jen.Id("req").Dot("Header").Dot("Set").Call(jen.Lit("Content-Type"), jen.Lit("application/json")),
-		jen.If(jen.Id("token").Op("!=").Lit("")).Block(jen.Id("req").Dot("Header").Dot("Set").Call(jen.Lit("Authorization"), jen.Id("token"))),
-		jen.Id("resp").Op(",").Id("err").Op(":=").Qual("net/http", "DefaultClient").Dot("Do").Call(jen.Id("req")),
+		jen.Id("resp").Op(",").Id("err").Op(":=").Id("client").Dot("Do").Call(jen.Id("req")),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(jen.Return(jen.Nil(), jen.Id("err"))),
 		jen.Defer().Id("resp").Dot("Body").Dot("Close").Call(),
 		jen.Id("body").Op(",").Id("err").Op(":=").Qual("io", "ReadAll").Call(jen.Id("resp").Dot("Body")),
@@ -890,7 +917,7 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 
 		// []RetType
 		f.Func().Params(jen.Id("q").Op("*").Id(structName)).Id("Do").
-			Params(jen.Id("endpoint"), jen.Id("token").String()).
+			Params(jen.Id("ctx").Qual("context", "Context"), jen.Id("client").Op("*").Id("Client")).
 			Params(doRet, jen.Error()).Block(
 			jen.Id("query").Op(",").Id("vars").Op(":=").Id("q").Dot("Build").Call(),
 			// response type
@@ -898,7 +925,7 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 				jen.Id("Data").Struct(doResp).Tag(map[string]string{"json": "data"}),
 				jen.Id("Errors").Index().Id("GraphqlError").Tag(map[string]string{"json": "errors"}),
 			),
-			jen.Id("err").Op(":=").Id("do").Call(jen.Id("endpoint"), jen.Id("token"), jen.Id("query"), jen.Id("vars"), jen.Op("&").Id("resp")),
+			jen.Id("err").Op(":=").Id("client").Dot("Do").Call(jen.Id("ctx"), jen.Id("query"), jen.Id("vars"), jen.Op("&").Id("resp")),
 			jen.If(jen.Id("err").Op("!=").Nil()).Block(jen.Return(doRetZero, jen.Id("err"))),
 			jen.Return(jen.Id("resp").Dot("Data").Dot(toExported(op.Name)), jen.Id("hasError").Call(jen.Id("resp").Dot("Errors"))),
 		)
