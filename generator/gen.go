@@ -885,6 +885,7 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 			}
 		}
 
+		doResp.Tag(map[string]string{"json": op.Name})
 		doRetZero := zeroValue(doRet.GoString())
 
 		// []RetType
