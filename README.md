@@ -6,11 +6,12 @@ This tool generates a type-safe Go SDK from a GraphQL introspection schema. It c
 
 - **Model Generation**: Automatically generates Go structs for all `OBJECT`, `INPUT_OBJECT`, `ENUM`, and `INTERFACE` types from your GraphQL schema.
 - **Type-Safe Query Builder**: Creates `Selector` types for each object, enabling you to build complex GraphQL queries in a type-safe manner, with autocompletion support in your IDE.
+- **Flexible Client**: Generates a `Client` object that can be configured with a custom `http.Client`, allowing for flexible authentication, middleware, and transport-level logic.
 - **Fluent Operation Builders**: For each `Query` and `Mutation`, it generates a builder struct that provides:
     - Methods for setting operation arguments.
     - A `Select()` method to specify which fields to retrieve, using the generated selectors.
     - A `Build()` method to get the final GraphQL query string and variables map.
-    - A `Do()` method to execute the request against a GraphQL endpoint and unmarshal the response into strongly-typed Go structs.
+    - A `Do()` method to execute the request using a `context.Context` and a configured `Client` instance, unmarshalling the response into strongly-typed Go structs.
 - **Custom Scalar Mapping**: Allows you to map any GraphQL scalar to a specific Go type via a configuration file.
 - **JSON Tag Customization**: Supports adding `omitempty` to JSON tags for all struct fields.
 
@@ -36,7 +37,7 @@ The generator produces three files in the specified output directory:
 
 1.  `model.go`: Contains all the generated Go structs corresponding to your GraphQL schema's `OBJECT`, `INPUT_OBJECT`, `ENUM`, and `INTERFACE` types.
 2.  `selector.go`: Contains the `Selector` types (e.g., `UserSelector`) and their methods, which form the basis of the type-safe query builder.
-3.  `client.go`: Contains the high-level operation builders (e.g., `QueryUsers`, `MutationCreateUser`), the `Do()` method for executing requests, and other client-side helper code.
+3.  `client.go`: Contains the `Client` object, the high-level operation builders (e.g., `QueryUsers`, `MutationCreateUser`), and other client-side helper code.
 
 ## Example
 
@@ -52,38 +53,63 @@ go run main.go --schema ./schema.json --out ./sdk --pkg sdk
 
 ### 2. Use the Generated SDK
 
-Now you can use the generated SDK in your Go application to build and execute a query.
+Now you can use the generated SDK in your Go application to build and execute a query. The new design allows you to configure a client with custom authentication.
 
 ```go
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"yourapp/sdk" // Import the generated package
 )
 
+// authTransport is a custom http.RoundTripper that adds an Authorization header.
+type authTransport struct {
+	transport http.RoundTripper
+	token     string
+}
+
+// RoundTrip injects the authentication token into each request.
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	transport := t.transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	newReq := req.Clone(req.Context())
+	newReq.Header.Set("Authorization", "Bearer "+t.token)
+	return transport.RoundTrip(newReq)
+}
+
 func main() {
-	// 1. Create a new builder for the "users" query.
-	// The generator creates a constructor like `New<Kind><OperationName>`.
+	// 1. Create a custom http.Client for authentication.
+	// This gives you full control over headers, timeouts, and transport-level logic.
+	customHTTPClient := &http.Client{
+		Transport: &authTransport{
+			token: "YOUR_SECRET_TOKEN",
+		},
+	}
+
+	// 2. Create a new GraphQL client with the endpoint and your custom http.Client.
+	endpoint := "https://api.example.com/graphql"
+	client := sdk.NewClient(endpoint, customHTTPClient)
+
+	// 3. Create a new builder for the "users" query.
 	query := sdk.NewQueryUsers()
 
-	// 2. Set arguments for the query (if any).
-	// Methods are generated for each argument, e.g., `Where(UserWhereInput)`.
+	// 4. Set arguments for the query (if any).
 	query.Where(sdk.UserWhereInput{
 		Name: "John Doe",
 	})
 
-	// 3. Select the fields you want in the response.
-	// The `Select` method provides a type-safe selector for the return type.
+	// 5. Select the fields you want in the response.
 	query.Select(func(s *sdk.SelectorUser) {
-		// Select scalar fields directly
 		s.Select(
 			sdk.UserFieldId,
 			sdk.UserFieldName,
 			sdk.UserFieldEmail,
 		)
-
-		// Select nested objects with their own selectors
 		s.SelectPosts(func(p *sdk.SelectorPost) {
 			p.Select(
 				sdk.PostFieldId,
@@ -92,18 +118,14 @@ func main() {
 		})
 	})
 
-	// 4. Execute the query.
-	// The `Do` method sends the request and unmarshals the response.
-	// The return type is strongly-typed based on the schema.
-	endpoint := "https://api.example.com/graphql"
-	authToken := "your-auth-token" // or "" if not needed
-	
-	users, err := query.Do(endpoint, authToken)
+	// 6. Execute the query using the client.
+	// Pass a context and the configured client to the Do method.
+	users, err := query.Do(context.Background(), client)
 	if err != nil {
 		panic(err)
 	}
 
-	// 5. Use the typed result.
+	// 7. Use the typed result.
 	fmt.Printf("Successfully fetched %d users.\n", len(users))
 	for _, user := range users {
 		fmt.Printf("- User ID: %s, Name: %s\n", user.Id, user.Name)
