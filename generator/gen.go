@@ -158,17 +158,51 @@ func Generate(conf *GenerateConfig) error {
 	loadScalars(conf)
 
 	var intros = conf.Schema
+	// find Query/Mutation root
+	var queryRoot *TypeDef
+	var mutationRoot *TypeDef
+	var typeSelectors []TypeDef
+	var typeEnum []TypeDef
+	var typeInterface []TypeDef
+	var typeInputObject []TypeDef
+	var typeObject []TypeDef
 	// build type map & object name list
 	typeMap := map[string]TypeDef{}
-	objectNames := []string{}
 	objectMap := map[string]struct{}{}
 	selectorArgMap := map[string]map[string]ArgDef{}
 	for _, t := range intros.Data.Schema.Types {
 		typeMap[t.Name] = t
 		if t.Kind == "OBJECT" && !strings.HasPrefix(t.Name, "__") {
-			objectNames = append(objectNames, t.Name)
 			objectMap[t.Name] = struct{}{}
 		}
+
+		if t.Name == "Query" {
+			tr := t
+			queryRoot = &tr
+		}
+		if t.Name == "Mutation" {
+			tr := t
+			mutationRoot = &tr
+		}
+
+		if isSelectorType(t) {
+			typeSelectors = append(typeSelectors, t)
+		}
+
+		exclude := strings.HasPrefix(t.Name, "__") || t.Name == ""
+		if t.Kind == KindEnum.String() && !exclude {
+			typeEnum = append(typeEnum, t)
+		}
+		if t.Kind == KindInterface.String() && !exclude {
+			typeInterface = append(typeInterface, t)
+		}
+		if t.Kind == KindInputObject.String() && !exclude {
+			typeInputObject = append(typeInputObject, t)
+		}
+		if t.Kind == KindObject.String() && !exclude {
+			typeObject = append(typeObject, t)
+		}
+
 		if isSelectorType(t) {
 			for _, field := range t.Fields {
 				if len(field.Args) == 0 {
@@ -201,45 +235,41 @@ func Generate(conf *GenerateConfig) error {
 	fClient.HeaderComment(comment)
 
 	// generate types
-	for _, t := range intros.Data.Schema.Types {
-		if strings.HasPrefix(t.Name, "__") || t.Name == "" {
-			continue
-		}
-		switch t.Kind {
-		case KindEnum.String():
-			genEnum(f, t)
-		case KindInterface.String():
-			genInterface(conf, f, t)
-		case KindInputObject.String():
-			genInput(conf, f, t)
-		case KindObject.String():
-			genObject(conf, f, t)
-		}
+	sort.Slice(typeEnum, func(i, j int) bool {
+		return typeEnum[i].Name < typeEnum[j].Name
+	})
+	sort.Slice(typeInterface, func(i, j int) bool {
+		return typeInterface[i].Name < typeInterface[j].Name
+	})
+	sort.Slice(typeInputObject, func(i, j int) bool {
+		return typeInputObject[i].Name < typeInputObject[j].Name
+	})
+	sort.Slice(typeObject, func(i, j int) bool {
+		return typeObject[i].Name < typeObject[j].Name
+	})
+	sort.Slice(typeSelectors, func(i, j int) bool {
+		return typeSelectors[i].Name < typeSelectors[j].Name
+	})
+
+	for _, t := range typeEnum {
+		genEnum(f, t)
+	}
+	for _, t := range typeInterface {
+		genInterface(conf, f, t)
+	}
+	for _, t := range typeInputObject {
+		genInput(conf, f, t)
+	}
+	for _, t := range typeObject {
+		genObject(conf, f, t)
 	}
 
 	// Field AST helpers
 	genFieldHelpers(f)
 
 	// generate selectors for object types
-	for _, t := range intros.Data.Schema.Types {
-		if !isSelectorType(t) {
-			continue
-		}
-		genSelector(conf, fSelector, t.Name, t, objectMap, selectorArgMap)
-	}
-
-	// find Query/Mutation root
-	var queryRoot *TypeDef
-	var mutationRoot *TypeDef
-	for _, t := range intros.Data.Schema.Types {
-		if t.Name == "Query" {
-			tr := t
-			queryRoot = &tr
-		}
-		if t.Name == "Mutation" {
-			tr := t
-			mutationRoot = &tr
-		}
+	for _, t := range typeSelectors {
+		genSelector(conf, fSelector, t, objectMap, selectorArgMap)
 	}
 
 	genGraphQLError(fClient)
@@ -249,10 +279,10 @@ func Generate(conf *GenerateConfig) error {
 	genBuildFunc(fClient)
 
 	if queryRoot != nil {
-		genOperations(conf, fClient, *queryRoot, "Query", typeMap, objectNames)
+		genOperations(conf, fClient, *queryRoot, "Query", typeMap, objectMap)
 	}
 	if mutationRoot != nil {
-		genOperations(conf, fClient, *mutationRoot, "Mutation", typeMap, objectNames)
+		genOperations(conf, fClient, *mutationRoot, "Mutation", typeMap, objectMap)
 	}
 
 	err := f.Save(path.Join(conf.OutPath, "model.go"))
@@ -388,6 +418,9 @@ func genEnum(f *jen.File, t TypeDef) {
 	f.Type().Id(t.Name).String()
 	f.Line()
 	f.Const().DefsFunc(func(g *jen.Group) {
+		sort.Slice(t.EnumValues, func(i, j int) bool {
+			return t.EnumValues[i].Name < t.EnumValues[j].Name
+		})
 		for _, ev := range t.EnumValues {
 			g.Id(fmt.Sprintf("%s%s", t.Name, toExported(ev.Name))).Id(t.Name).Op("=").Lit(ev.Name)
 		}
@@ -396,7 +429,7 @@ func genEnum(f *jen.File, t TypeDef) {
 }
 
 func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
-	fields := buildFields(conf, f, KindInterface, t.Fields)
+	fields := buildFields(conf, KindInterface, t.Fields)
 	f.Commentf("%s interface base", t.Name)
 	f.Type().Id(t.Name).Struct(fields...)
 	f.Line()
@@ -408,6 +441,10 @@ func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
 		Name:       enumType,
 		EnumValues: []EnumValue{},
 	}
+	// sort fields
+	sort.Slice(t.Fields, func(i, j int) bool {
+		return t.Fields[i].Name < t.Fields[j].Name
+	})
 	for _, tf := range t.Fields {
 		goType := &GoType{}
 		detectGraphQLType(conf, tf.Type, goType)
@@ -438,7 +475,11 @@ func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
 }
 
 func genInput(conf *GenerateConfig, f *jen.File, t TypeDef) {
-	fields := buildFields(conf, f, KindInputObject, t.InputFields)
+	// sort fields
+	sort.Slice(t.InputFields, func(i, j int) bool {
+		return t.InputFields[i].Name < t.InputFields[j].Name
+	})
+	fields := buildFields(conf, KindInputObject, t.InputFields)
 	f.Commentf("%s input", t.Name)
 	f.Type().Id(t.Name).Struct(fields...)
 	f.Line()
@@ -448,8 +489,15 @@ func genObject(conf *GenerateConfig, f *jen.File, t TypeDef) {
 	if len(t.Fields) == 0 {
 		return
 	}
-	fields := buildFields(conf, f, KindObject, t.Fields)
+	// sort fields
+	sort.Slice(t.Fields, func(i, j int) bool {
+		return t.Fields[i].Name < t.Fields[j].Name
+	})
+	fields := buildFields(conf, KindObject, t.Fields)
 	// embed interfaces
+	sort.Slice(t.Interfaces, func(i, j int) bool {
+		return t.Interfaces[i].Name < t.Interfaces[j].Name
+	})
 	for _, iface := range t.Interfaces {
 		fields = append([]jen.Code{jen.Id(iface.Name)}, fields...)
 	}
@@ -496,7 +544,7 @@ func genObject(conf *GenerateConfig, f *jen.File, t TypeDef) {
 }
 
 // buildFields: create jen.Code slice for struct fields
-func buildFields(conf *GenerateConfig, f *jen.File, kind Kind, defs []FieldDef) []jen.Code {
+func buildFields(conf *GenerateConfig, kind Kind, defs []FieldDef) []jen.Code {
 	var out []jen.Code
 	for _, d := range defs {
 		gt := &GoType{}
@@ -649,9 +697,9 @@ func genFieldHelpers(f *jen.File) {
 }
 
 // ==================== selectors ====================
-func genSelector(conf *GenerateConfig, f *jen.File, typeName string, tp TypeDef, objectMap map[string]struct{}, selectorArgMap map[string]map[string]ArgDef) {
-	sel := fmt.Sprintf("Selector%v", typeName)
-	ctor := fmt.Sprintf("Select%v", typeName)
+func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[string]struct{}, selectorArgMap map[string]map[string]ArgDef) {
+	sel := fmt.Sprintf("Selector%v", tp.Name)
+	ctor := fmt.Sprintf("Select%v", tp.Name)
 	f.Commentf("%s selector", sel)
 	f.Type().Id(sel).Struct(jen.Id("field").Op("*").Id("Field"))
 	f.Line()
@@ -674,7 +722,7 @@ func genSelector(conf *GenerateConfig, f *jen.File, typeName string, tp TypeDef,
 	f.Func().
 		Params(jen.Id("q").Op("*").Id(sel)).
 		Id("Select").
-		Params(jen.Id("fields").Op("...").Id(fmt.Sprintf("%vField", typeName))).
+		Params(jen.Id("fields").Op("...").Id(fmt.Sprintf("%vField", tp.Name))).
 		Op("*").Id(sel).
 		BlockFunc(func(body *jen.Group) {
 			body.For(jen.List(jen.Id("_"), jen.Id("f")).Op(":=").Range().Id("fields")).BlockFunc(func(loop *jen.Group) {
@@ -710,13 +758,13 @@ func genSelector(conf *GenerateConfig, f *jen.File, typeName string, tp TypeDef,
 	}
 
 	var funcNameList []string
-	for funcName, _ := range selectorArgMap[typeName] {
+	for funcName, _ := range selectorArgMap[tp.Name] {
 		funcNameList = append(funcNameList, funcName)
 	}
 	sort.Strings(funcNameList)
 
 	for _, funcName := range funcNameList {
-		arg := selectorArgMap[typeName][funcName]
+		arg := selectorArgMap[tp.Name][funcName]
 		f.Func().
 			Params(jen.Id("q").Op("*").Id(sel)).
 			Id(toExported(funcName)).
@@ -738,7 +786,10 @@ func genSelector(conf *GenerateConfig, f *jen.File, typeName string, tp TypeDef,
 }
 
 // ==================== operations generation ====================
-func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string, typeMap map[string]TypeDef, objectNames []string) {
+func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string, typeMap map[string]TypeDef, objectMap map[string]struct{}) {
+	sort.Slice(root.Fields, func(i, j int) bool {
+		return root.Fields[i].Name < root.Fields[j].Name
+	})
 	for _, op := range root.Fields {
 		structName := kind + toExported(op.Name) // e.g., QueryUsers -> Query + UsersPascal
 		// builder struct
@@ -774,7 +825,6 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 			f.Func().Params(jen.Id("q").Op("*").Id(structName)).Id("initArgTypes").Params().BlockFunc(func(g *jen.Group) {
 				for _, a := range op.Args {
 					typeName := extractGraphqlType(a.Type)
-					// set q.field.ArgTypes["argname"] = "TypeName"
 					g.Id("q").Dot("field").Dot("ArgTypes").Index(jen.Lit(a.Name)).Op("=").Lit(typeName)
 				}
 			})
@@ -783,6 +833,9 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 		f.Line()
 
 		// generate param setter methods based on op.Args
+		sort.Slice(op.Args, func(i, j int) bool {
+			return op.Args[i].Name < op.Args[j].Name
+		})
 		for _, a := range op.Args {
 			method := toExported(a.Name)
 			gt := &GoType{}
@@ -821,11 +874,9 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 		for _, cf := range childFields {
 			n, _ := extractGraphqlTypeName(cf.Type)
 			// if n appears in objectNames, it's an object; include
-			for _, on := range objectNames {
-				if on == n {
-					childObjectSet[n] = struct{}{}
-					break
-				}
+			if _, ok := objectMap[n]; ok {
+				childObjectSet[n] = struct{}{}
+				break
 			}
 		}
 		childObjectList := []string{}
@@ -874,11 +925,8 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 		foundObj := false
 		doRet := jen.Interface()
 		doResp := jen.Id(toExported(op.Name)).Interface()
-		for _, on := range objectNames {
-			if on == retName {
-				foundObj = true
-				break
-			}
+		if _, ok = objectMap[retName]; ok {
+			foundObj = true
 		}
 		if foundObj {
 			if retList {
