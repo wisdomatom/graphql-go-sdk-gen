@@ -429,6 +429,9 @@ func genEnum(f *jen.File, t TypeDef) {
 }
 
 func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
+	sort.Slice(t.Fields, func(i, j int) bool {
+		return t.Fields[i].Name < t.Fields[j].Name
+	})
 	fields := buildFields(conf, KindInterface, t.Fields)
 	f.Commentf("%s interface base", t.Name)
 	f.Type().Id(t.Name).Struct(fields...)
