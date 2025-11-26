@@ -821,6 +821,9 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 			},
 		)
 
+		sort.Slice(op.Args, func(i, j int) bool {
+			return op.Args[i].Name < op.Args[j].Name
+		})
 		if len(op.Args) > 0 {
 			f.Func().Params(jen.Id("q").Op("*").Id(structName)).Id("initArgTypes").Params().BlockFunc(func(g *jen.Group) {
 				for _, a := range op.Args {
