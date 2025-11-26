@@ -2,7 +2,9 @@
 package generator
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -277,6 +279,7 @@ func Generate(conf *GenerateConfig) error {
 	genDo(fClient)
 	genNewField(fClient)
 	genBuildFunc(fClient)
+	genPtrFunc(fClient)
 
 	if queryRoot != nil {
 		genOperations(conf, fClient, *queryRoot, "Query", typeMap, objectMap)
@@ -285,20 +288,37 @@ func Generate(conf *GenerateConfig) error {
 		genOperations(conf, fClient, *mutationRoot, "Mutation", typeMap, objectMap)
 	}
 
-	err := f.Save(path.Join(conf.OutPath, "model.go"))
+	// 正确的方式：使用 Render
+	var buf bytes.Buffer
+	err := f.Render(&buf)
 	if err != nil {
 		return err
 	}
+	err = os.WriteFile(path.Join(conf.OutPath, "model.go"), buf.Bytes(), 0644)
+	if err != nil {
+		return err
+	}
+	buf.Reset()
 
-	err = fSelector.Save(path.Join(conf.OutPath, "selector.go"))
+	err = fSelector.Render(&buf)
 	if err != nil {
 		return err
 	}
+	err = os.WriteFile(path.Join(conf.OutPath, "selector.go"), buf.Bytes(), 0644)
+	if err != nil {
+		return err
+	}
+	buf.Reset()
 
-	err = fClient.Save(path.Join(conf.OutPath, "client.go"))
+	err = fClient.Render(&buf)
 	if err != nil {
 		return err
 	}
+	err = os.WriteFile(path.Join(conf.OutPath, "client.go"), buf.Bytes(), 0644)
+	if err != nil {
+		return err
+	}
+	buf.Reset()
 
 	return nil
 }
@@ -376,6 +396,16 @@ func genClient(f *jen.File) {
 					jen.Id("HTTPClient"): jen.Id("httpClient"),
 				},
 			)),
+		)
+}
+
+func genPtrFunc(f *jen.File) {
+	// 生成 Ptr 泛型函数
+	f.Func().Id("Ptr").Types(jen.Id("T").Any()).
+		Params(jen.Id("v").Id("T")).
+		Op("*").Id("T").
+		Block(
+			jen.Return(jen.Op("&").Id("v")),
 		)
 }
 
