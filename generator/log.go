@@ -3,7 +3,6 @@ package generator
 import (
 	"gopkg.in/natefinch/lumberjack.v2"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 
@@ -49,7 +48,7 @@ func init() {
 
 	// 如果您希望同时输出到控制台 (Stdout) 和文件，可以结合使用 io.MultiWriter
 	mw := io.MultiWriter(os.Stdout, lumberjackLogger)
-	log.SetOutput(mw)
+	Log.SetOutput(mw)
 
 	// 可选：将标准库的log也重定向到logrus
 	// log.StandardLogger().Hooks.Add(&logrus_syslog.SyslogHook{...})

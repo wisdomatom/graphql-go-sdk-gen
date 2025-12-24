@@ -4,12 +4,11 @@ package generator
 import (
 	"bytes"
 	"fmt"
+	"github.com/dave/jennifer/jen"
 	"os"
 	"path"
 	"sort"
 	"strings"
-
-	"github.com/dave/jennifer/jen"
 )
 
 /*
@@ -171,7 +170,6 @@ func Generate(conf *GenerateConfig) error {
 	// build type map & object name list
 	typeMap := map[string]TypeDef{}
 	objectMap := map[string]struct{}{}
-	selectorArgMap := map[string]map[string]ArgDef{}
 	for _, t := range intros.Data.Schema.Types {
 		typeMap[t.Name] = t
 		if t.Kind == "OBJECT" && !strings.HasPrefix(t.Name, "__") {
@@ -203,27 +201,6 @@ func Generate(conf *GenerateConfig) error {
 		}
 		if t.Kind == KindObject.String() && !exclude {
 			typeObject = append(typeObject, t)
-		}
-
-		if isSelectorType(t) {
-			for _, field := range t.Fields {
-				if len(field.Args) == 0 {
-					continue
-				}
-				for _, arg := range field.Args {
-					tp := extractNamedGoType(conf, field.Type)
-					_, ok := selectorArgMap[tp]
-					if !ok {
-						selectorArgMap[tp] = map[string]ArgDef{}
-					}
-					paramName := arg.Name
-					exist, ok := selectorArgMap[tp][arg.Name]
-					if ok && extractNamedGoType(conf, exist.Type) != extractNamedGoType(conf, arg.Type) {
-						paramName = fmt.Sprintf("%v%v", arg.Name, extractNamedGoType(conf, arg.Type))
-					}
-					selectorArgMap[tp][paramName] = arg
-				}
-			}
 		}
 	}
 
@@ -271,7 +248,7 @@ func Generate(conf *GenerateConfig) error {
 
 	// generate selectors for object types
 	for _, t := range typeSelectors {
-		genSelector(conf, fSelector, t, objectMap, selectorArgMap)
+		genSelector(conf, fSelector, t, objectMap)
 	}
 
 	genGraphQLError(fClient)
@@ -331,8 +308,7 @@ func genNewField(f *jen.File) {
 			jen.Op("&").Id("Field").Values(
 				jen.Dict{
 					jen.Id("Name"):     jen.Id("name"),
-					jen.Id("Args"):     jen.Make(jen.Map(jen.String()).Interface()),
-					jen.Id("ArgTypes"): jen.Make(jen.Map(jen.String()).String()),
+					jen.Id("Args"):     jen.Make(jen.Map(jen.String()).Op("*").Id("FieldArg")),
 					jen.Id("Children"): jen.Index().Op("*").Id("Field").Values(),
 				},
 			),
@@ -462,7 +438,7 @@ func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
 	sort.Slice(t.Fields, func(i, j int) bool {
 		return t.Fields[i].Name < t.Fields[j].Name
 	})
-	fields := buildFields(conf, KindInterface, t.Fields)
+	fields := buildFields(conf, KindInterface, t.Name, t.Fields)
 	f.Commentf("%s interface base", t.Name)
 	f.Type().Id(t.Name).Struct(fields...)
 	f.Line()
@@ -479,10 +455,7 @@ func genInterface(conf *GenerateConfig, f *jen.File, t TypeDef) {
 		return t.Fields[i].Name < t.Fields[j].Name
 	})
 	for _, tf := range t.Fields {
-		goType := &GoType{}
-		detectGraphQLType(conf, tf.Type, goType)
-		if goType.IsObject {
-			//fmt.Println(">>>", tf.Type, goType.Type)
+		if !isGraphqlScalarType(tf.Type) {
 			continue
 		}
 		typeDefEnum.EnumValues = append(typeDefEnum.EnumValues, EnumValue{
@@ -512,7 +485,7 @@ func genInput(conf *GenerateConfig, f *jen.File, t TypeDef) {
 	sort.Slice(t.InputFields, func(i, j int) bool {
 		return t.InputFields[i].Name < t.InputFields[j].Name
 	})
-	fields := buildFields(conf, KindInputObject, t.InputFields)
+	fields := buildFields(conf, KindInputObject, t.Name, t.InputFields)
 	f.Commentf("%s input", t.Name)
 	f.Type().Id(t.Name).Struct(fields...)
 	f.Line()
@@ -526,7 +499,7 @@ func genObject(conf *GenerateConfig, f *jen.File, t TypeDef) {
 	sort.Slice(t.Fields, func(i, j int) bool {
 		return t.Fields[i].Name < t.Fields[j].Name
 	})
-	fields := buildFields(conf, KindObject, t.Fields)
+	fields := buildFields(conf, KindObject, t.Name, t.Fields)
 	// embed interfaces
 	sort.Slice(t.Interfaces, func(i, j int) bool {
 		return t.Interfaces[i].Name < t.Interfaces[j].Name
@@ -544,10 +517,7 @@ func genObject(conf *GenerateConfig, f *jen.File, t TypeDef) {
 		EnumValues: []EnumValue{},
 	}
 	for _, tf := range t.Fields {
-		goType := &GoType{}
-		detectGraphQLType(conf, tf.Type, goType)
-		if goType.IsObject {
-			//fmt.Println(">>>", tf.Type, goType.Type)
+		if !isGraphqlScalarType(tf.Type) {
 			continue
 		}
 		typeDefEnum.EnumValues = append(typeDefEnum.EnumValues, EnumValue{
@@ -577,75 +547,37 @@ func genObject(conf *GenerateConfig, f *jen.File, t TypeDef) {
 }
 
 // buildFields: create jen.Code slice for struct fields
-func buildFields(conf *GenerateConfig, kind Kind, defs []FieldDef) []jen.Code {
+func buildFields(conf *GenerateConfig, kind Kind, structName string, defs []FieldDef) []jen.Code {
 	var out []jen.Code
 	for _, d := range defs {
-		gt := &GoType{}
-		detectGraphQLType(conf, d.Type, gt)
-		var texpr jen.Code
-		// basic mapping
-		if gt.Type != "" {
-			if gt.Pkg != "" {
-				texpr = jen.Qual(gt.Pkg, gt.Type)
-			} else {
-				texpr = jen.Id(gt.Type)
-			}
-		} else {
-			texpr = jen.Id("interface{}")
+		sta := &jen.Statement{}
+		if structName == sta.GoString() ||
+			(!isGraphqlScalarType(d.Type) && !isGraphqlCompoundType(d.Type)) ||
+			(kind == KindInputObject && !isGraphqlCompoundType(d.Type)) {
+			sta.Op("*")
 		}
-		isPtr := false
-		if gt.Type != "" && gt.Type != "string" && gt.Type != "int" && gt.Type != "bool" && gt.Type != "float64" && gt.Pkg == "" && !gtIsBuiltin(gt.Type) {
-			// assume it's an object type -> pointer for non-list
-			if !gtIsList(d.Type) {
-				isPtr = true
-			}
-		}
-		if isPtr || gt.IsPtr || (kind == KindInputObject && !gtIsList(d.Type)) {
-			texpr = jen.Op("*").Add(texpr)
-		}
-		if gtIsList(d.Type) {
-			texpr = jen.Index().Add(texpr)
-		}
+		extractGoType(conf, d.Type, sta)
 		tag := d.Name
 		if conf.JsonOmitEmpty {
 			tag = tag + ",omitempty"
 		}
-		out = append(out, jen.Id(safeFieldName(d.Name)).Add(texpr).Tag(map[string]string{"json": tag}))
+		out = append(out, jen.Id(safeFieldName(d.Name)).Add(sta).Tag(map[string]string{"json": tag}))
 	}
 	return out
 }
 
-func gtIsList(t GQLType) bool {
-	switch t.Kind {
-	case "LIST":
-		return true
-	case "NON_NULL":
-		if t.OfType != nil {
-			return gtIsList(*t.OfType)
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-func gtIsBuiltin(name string) bool {
-	switch name {
-	case "string", "int", "bool", "float64", "interface{}":
-		return true
-	default:
-		return false
-	}
-}
-
 // ================= Field AST helpers =================
 func genFieldHelpers(f *jen.File) {
+	// FieldArg Struct
+	f.Type().Id("FieldArg").Struct(
+		jen.Id("Arg").Interface(),
+		jen.Id("ArgType").String(),
+	)
 	// Field struct
 	f.Comment("Field is a selection node")
 	f.Type().Id("Field").Struct(
 		jen.Id("Name").String(),
-		jen.Id("Args").Map(jen.String()).Interface(),
-		jen.Id("ArgTypes").Map(jen.String()).String(), // name -> GraphQL type name string
+		jen.Id("Args").Map(jen.String()).Op("*").Id("FieldArg"),
 		jen.Id("Children").Index().Op("*").Id("Field"),
 	)
 	f.Line()
@@ -667,8 +599,8 @@ func genFieldHelpers(f *jen.File) {
 			// varName like "userwhere_1"
 			jen.Id("varName").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%s_%d"), jen.Qual("strings", "ToLower").Call(jen.Id("k")), jen.Id("*counter")),
 			jen.Id("nameMap").Index(jen.Id("f").Dot("Name").Op("+").Lit(".").Op("+").Id("k")).Op("=").Id("varName"),
-			jen.Id("varTypes").Index(jen.Id("varName")).Op("=").Id("f").Dot("ArgTypes").Index(jen.Id("k")),
-			jen.Id("vars").Index(jen.Id("varName")).Op("=").Id("v"),
+			jen.Id("varTypes").Index(jen.Id("varName")).Op("=").Id("v").Dot("ArgType"),
+			jen.Id("vars").Index(jen.Id("varName")).Op("=").Id("v").Dot("Arg"),
 		),
 		jen.For(jen.Id("_").Op(",").Id("c").Op(":=").Range().Op(jen.Id("f").Dot("Children").GoString())).Block(
 			jen.Id("fieldCollectVars").Call(jen.Id("c"), jen.Id("vars"), jen.Id("varTypes"), jen.Id("nameMap"), jen.Id("counter")),
@@ -730,7 +662,7 @@ func genFieldHelpers(f *jen.File) {
 }
 
 // ==================== selectors ====================
-func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[string]struct{}, selectorArgMap map[string]map[string]ArgDef) {
+func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[string]struct{}) {
 	sel := fmt.Sprintf("Selector%v", tp.Name)
 	ctor := fmt.Sprintf("Select%v", tp.Name)
 	f.Commentf("%s selector", sel)
@@ -743,8 +675,7 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 				jen.Id("field"): jen.Op("&").Id("Field").Values(
 					jen.Dict{
 						jen.Id("Name"):     jen.Id("parent"), // parent will set actual field name on attach
-						jen.Id("Args"):     jen.Make(jen.Map(jen.String()).Interface()),
-						jen.Id("ArgTypes"): jen.Make(jen.Map(jen.String()).String()),
+						jen.Id("Args"):     jen.Make(jen.Map(jen.String()).Op("*").Id("FieldArg")),
 						jen.Id("Children"): jen.Index().Op("*").Id("Field").Values(),
 					},
 				),
@@ -775,37 +706,35 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 		if !ok {
 			continue
 		}
+		var selectFnParam []jen.Code
 		selName := fmt.Sprintf("Selector%v", tpN)
+
+		for _, childArg := range child.Args {
+			var paramType = &jen.Statement{}
+			extractGoType(conf, childArg.Type, paramType)
+			pt := paramType.GoString()
+			selectFnParam = append(selectFnParam, jen.Id(childArg.Name).Id(pt))
+		}
+
+		selectFnParam = append(selectFnParam, jen.Id("fn").Func().Params(jen.Id("q").Op("*").Id(selName)))
 		f.Func().
 			Params(jen.Id("q").Op("*").Id(sel)).
 			Id(fmt.Sprintf("Select%s", toExported(child.Name))).
-			Params(jen.Id("fn").Func().Params(jen.Id("q").Op("*").Id(selName))).
+			Params(selectFnParam...).
 			Op("*").Id(sel).
 			BlockFunc(func(body *jen.Group) {
 				body.Id("selector").Op(":=").Id(fmt.Sprintf("Select%s", tpN)).Call(jen.Lit(child.Name))
+				for _, childArg := range child.Args {
+					body.Id("selector").Dot("field").Dot("Args").Index(jen.Lit(childArg.Name)).Op("=").Op("&").Id("FieldArg").Values(
+						jen.Dict{
+							jen.Id("Arg"):     jen.Id(childArg.Name),
+							jen.Id("ArgType"): jen.Lit(extractGraphqlType(childArg.Type)),
+						},
+					)
+				}
 				body.Id("fn").Call(jen.Id("selector"))
 				body.Id("q").Dot("field").Dot("Children").
 					Op("=").Append(jen.Id("q").Dot("field").Dot("Children"), jen.Id("selector").Dot("GetField").Call())
-				body.Return(jen.Id("q"))
-			})
-	}
-
-	var funcNameList []string
-	for funcName, _ := range selectorArgMap[tp.Name] {
-		funcNameList = append(funcNameList, funcName)
-	}
-	sort.Strings(funcNameList)
-
-	for _, funcName := range funcNameList {
-		arg := selectorArgMap[tp.Name][funcName]
-		f.Func().
-			Params(jen.Id("q").Op("*").Id(sel)).
-			Id(toExported(funcName)).
-			Params(jen.Id("param").Add(jen.Id(extractNamedGoType(conf, arg.Type)))).
-			Op("*").Id(sel).
-			BlockFunc(func(body *jen.Group) {
-				body.Id("q").Dot("field").Dot("Args").Index(jen.Lit(funcName)).Op("=").Id("param")
-				body.Id("q").Dot("field").Dot("ArgTypes").Index(jen.Lit(funcName)).Op("=").Lit(extractGraphqlType(arg.Type))
 				body.Return(jen.Id("q"))
 			})
 	}
@@ -838,7 +767,7 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 
 		f.Line()
 
-		// New constructor which calls initArgTypes
+		// New constructor
 		newName := "New" + structName
 		f.Func().Id(newName).Params().Op("*").Id(structName).BlockFunc(
 			func(group *jen.Group) {
@@ -847,9 +776,6 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 						jen.Id("field"): jen.Id("newField").Call(jen.Lit(op.Name)),
 					},
 				)
-				if len(op.Args) > 0 {
-					group.Id("q").Dot("initArgTypes").Call()
-				}
 				group.Return(jen.Id("q"))
 			},
 		)
@@ -857,14 +783,6 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 		sort.Slice(op.Args, func(i, j int) bool {
 			return op.Args[i].Name < op.Args[j].Name
 		})
-		if len(op.Args) > 0 {
-			f.Func().Params(jen.Id("q").Op("*").Id(structName)).Id("initArgTypes").Params().BlockFunc(func(g *jen.Group) {
-				for _, a := range op.Args {
-					typeName := extractGraphqlType(a.Type)
-					g.Id("q").Dot("field").Dot("ArgTypes").Index(jen.Lit(a.Name)).Op("=").Lit(typeName)
-				}
-			})
-		}
 
 		f.Line()
 
@@ -874,24 +792,17 @@ func genOperations(conf *GenerateConfig, f *jen.File, root TypeDef, kind string,
 		})
 		for _, a := range op.Args {
 			method := toExported(a.Name)
-			gt := &GoType{}
-			detectGraphQLType(conf, a.Type, gt)
-			var paramType jen.Code
-			if gt.Type == "" {
-				paramType = jen.Interface()
-			} else {
-				if gt.Pkg != "" {
-					paramType = jen.Qual(gt.Pkg, gt.Type)
-				} else {
-					paramType = jen.Id(gt.Type)
-				}
-			}
-			if gtIsList(a.Type) {
-				paramType = jen.Index().Add(paramType)
-			}
+			sta := &jen.Statement{}
+			extractGoType(conf, a.Type, sta)
+
 			f.Func().Params(jen.Id("q").Op("*").Id(structName)).Id(method).
-				Params(jen.Id("v").Add(paramType)).Op("*").Id(structName).Block(
-				jen.Id("q").Dot("field").Dot("Args").Index(jen.Lit(a.Name)).Op("=").Id("v"),
+				Params(jen.Id("v").Add(sta)).Op("*").Id(structName).Block(
+				jen.Id("q").Dot("field").Dot("Args").Index(jen.Lit(a.Name)).Op("=").Op("&").Id("FieldArg").Values(
+					jen.Dict{
+						jen.Id("Arg"):     jen.Id("v"),
+						jen.Id("ArgType"): jen.Lit(extractGraphqlType(a.Type)),
+					},
+				),
 				jen.Return(jen.Id("q")),
 			)
 			f.Line()
@@ -1043,57 +954,41 @@ func zeroValue(typeName string) jen.Code {
 	return jen.Parens(jen.Id(typeName)).Block()
 }
 
-// detect GraphQL -> Go type basic
-func detectGraphQLType(conf *GenerateConfig, t GQLType, out *GoType) {
-	switch t.Kind {
-	case "NON_NULL":
-		if t.OfType != nil {
-			detectGraphQLType(conf, *t.OfType, out)
+func basicGraphqlTypeToGoType(conf *GenerateConfig, gql string) *jen.Statement {
+	// scalar mapping
+	cd := &jen.Statement{}
+
+	if g, ok := conf.ScalarMap[gql]; ok {
+		//if g.IsPtr {
+		//	cd.Op("*")
+		//}
+		if g.IsList {
+			cd.Index()
 		}
-		return
-	case "LIST":
-		out.Type = "" // leave inner type fill
-		out.IsList = true
-		if t.OfType != nil {
-			ot := &GoType{}
-			detectGraphQLType(conf, *t.OfType, ot)
-			if ot.Type != "" {
-				out.Type = ot.Type
-				out.Pkg = ot.Pkg
-			}
+		if g.Pkg != "" {
+			cd.Qual(g.Pkg, g.Type)
+		} else {
+			cd.Id(g.Type)
 		}
-		return
-	default:
-		// scalar mapping
-		if g, ok := conf.ScalarMap[t.Name]; ok {
-			*out = g
-			return
-		}
-		// builtin scalars
-		switch t.Name {
-		case "Int":
-			out.Type = "int"
-			return
-		case "Float":
-			out.Type = "float64"
-			return
-		case "Boolean":
-			out.Type = "bool"
-			return
-		case "String", "ID":
-			out.Type = "string"
-			return
-		case "DateTime":
-			out.Pkg = "time"
-			out.Type = "Time"
-		default:
-			// object or input object
-			out.IsObject = true
-			out.Type = t.Name
-			out.Pkg = ""
-			return
-		}
+		return cd
 	}
+
+	// builtin scalars
+	switch gql {
+	case "Int":
+		cd.Id("int")
+	case "Float":
+		cd.Id("float64")
+	case "Boolean":
+		cd.Id("bool")
+	case "String", "ID":
+		cd.Id("string")
+	case "DateTime":
+		cd.Qual("time", "Time")
+	default:
+		cd.Id(gql)
+	}
+	return cd
 }
 
 // extract named type name from GQLType (walk down)
@@ -1118,10 +1013,64 @@ func extractGraphqlType(t GQLType) string {
 	return ""
 }
 
-func extractNamedGoType(conf *GenerateConfig, t GQLType) string {
-	out := &GoType{}
-	detectGraphQLType(conf, t, out)
-	return out.Type
+func isGraphqlScalarType(t GQLType) bool {
+	switch t.Kind {
+	case "SCALAR":
+		return true
+	case "NON_NULL":
+		if t.OfType != nil {
+			return isGraphqlScalarType(*t.OfType)
+		}
+	case "LIST":
+		if t.OfType != nil {
+			return isGraphqlScalarType(*t.OfType)
+		}
+	default:
+		if t.OfType != nil {
+			return isGraphqlScalarType(*t.OfType)
+		}
+	}
+	return false
+}
+
+func isGraphqlCompoundType(t GQLType) bool {
+	switch t.Kind {
+	//case "NON_NULL":
+	//	return true
+	case "LIST":
+		return true
+	default:
+		if t.OfType != nil {
+			return isGraphqlScalarType(*t.OfType)
+		}
+	}
+	return false
+}
+
+func extractGoType(conf *GenerateConfig, t GQLType, sta *jen.Statement) {
+	switch t.Kind {
+	//case "NON_NULL":
+	//	if t.OfType != nil {
+	//		sta.Op("*")
+	//		extractGoType(conf, *t.OfType, sta)
+	//		return
+	//	}
+	case "LIST":
+		if t.OfType != nil {
+			sta.Index()
+			extractGoType(conf, *t.OfType, sta)
+			return
+		}
+	default:
+		if t.OfType != nil {
+			extractGoType(conf, *t.OfType, sta)
+			return
+		}
+		if t.Name != "" {
+			sta.Add(basicGraphqlTypeToGoType(conf, t.Name))
+		}
+	}
+	return
 }
 
 // extract return type name and whether it's list
