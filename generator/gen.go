@@ -711,6 +711,9 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 		var selectFnParam []jen.Code
 		selName := fmt.Sprintf("Selector%v", tpN)
 
+		sort.Slice(child.Args, func(i, j int) bool {
+			return child.Args[i].Name > child.Args[j].Name
+		})
 		for _, childArg := range child.Args {
 			var paramType = &jen.Statement{}
 			extractGoType(conf, childArg.Type, paramType)
