@@ -682,6 +682,7 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 			},
 		)),
 	)
+	f.Line()
 
 	f.Func().
 		Params(jen.Id("q").Op("*").Id(sel)).
@@ -699,6 +700,7 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 			})
 			body.Return(jen.Id("q"))
 		})
+	f.Line()
 
 	for _, child := range tp.Fields {
 		tpN, _ := extractGraphqlTypeName(child.Type)
@@ -737,6 +739,7 @@ func genSelector(conf *GenerateConfig, f *jen.File, tp TypeDef, objectMap map[st
 					Op("=").Append(jen.Id("q").Dot("field").Dot("Children"), jen.Id("selector").Dot("GetField").Call())
 				body.Return(jen.Id("q"))
 			})
+		f.Line()
 	}
 
 	f.Line()
