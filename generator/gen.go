@@ -1023,6 +1023,8 @@ func isGraphqlScalarType(t GQLType) bool {
 	switch t.Kind {
 	case "SCALAR":
 		return true
+	case "ENUM":
+		return true
 	case "NON_NULL":
 		if t.OfType != nil {
 			return isGraphqlScalarType(*t.OfType)
