@@ -409,7 +409,8 @@ func genBuildFunc(f *jen.File) {
 		),
 		jen.Id("decl").Op(":=").Qual("strings", "Join").Call(jen.Id("parts"), jen.Lit(", ")),
 		jen.If(jen.Id("decl").Op("!=").Lit("")).Block(jen.Id("decl").Op("=").Qual("fmt", "Sprintf").Call(jen.Lit("(%s)"), jen.Id("decl"))),
-		jen.Id("body").Op(":=").Qual("strings", "TrimSpace").Call(jen.Id("fieldToGraphQL").Call(jen.Id("field"), jen.Lit("  "), jen.Id("nameMap"))),
+		jen.Id("counter").Op("=").Lit(0),
+		jen.Id("body").Op(":=").Qual("strings", "TrimSpace").Call(jen.Id("fieldToGraphQL").Call(jen.Id("field"), jen.Lit("  "), jen.Id("nameMap"), jen.Op("&").Id("counter"))),
 		jen.Id("query").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%s%s{\n%s\n}"), jen.Id("strings").Dot("ToLower").Call(jen.Id("kind")), jen.Id("decl"), jen.Id("body")),
 		jen.Return(jen.Id("query"), jen.Id("vars")),
 	)
@@ -592,7 +593,13 @@ func genFieldHelpers(f *jen.File) {
 		jen.Id("counter").Op("*").Int(),
 	).Block(
 		jen.If(jen.Id("f").Op("==").Nil()).Block(jen.Return()),
-		jen.For(jen.Id("k").Op(",").Id("v").Op(":=").Range().Op(jen.Id("f").Dot("Args").GoString())).Block(
+		jen.Id("var").Id("args").Index().Id("string"),
+		jen.For(jen.Id("k").Op(",").Id("_").Op(":=").Range().Op(jen.Id("f").Dot("Args").GoString())).Block(
+			jen.Id("args").Op("=").Append(jen.Id("args").Op(",").Id("k")),
+		),
+		jen.Qual("sort", "Strings").Call(jen.Id("args")),
+		jen.For(jen.Id("_").Op(",").Id("k").Op(":=").Range().Op(jen.Id("args").GoString())).Block(
+			jen.Id("v").Op(":=").Id("f").Dot("Args").Index(jen.Id("k")),
 			jen.If(jen.Id("v").Op("==").Nil()).Block(jen.Continue()),
 
 			jen.Op("*").Id("counter").Op("++"),
@@ -609,17 +616,24 @@ func genFieldHelpers(f *jen.File) {
 	f.Line()
 
 	// fieldToGraphQL(f *Field, indent string, nameMap map[string]string) string
-	f.Func().Id("fieldToGraphQL").Params(jen.Id("f").Op("*").Id("Field"), jen.Id("indent").String(), jen.Id("nameMap").Map(jen.String()).String()).String().Block(
+	f.Func().Id("fieldToGraphQL").
+		Params(jen.Id("f").Op("*").Id("Field"), jen.Id("indent").String(), jen.Id("nameMap").Map(jen.String()).String(), jen.Id("counter").Op("*").Id("int")).
+		String().Block(
 		jen.If(jen.Id("f").Op("==").Nil()).Block(jen.Return(jen.Lit(""))),
 		jen.Id("var").Id("b").Qual("strings", "Builder"),
 		jen.Id("b").Dot("WriteString").Call(jen.Id("indent").Op("+").Id("f").Dot("Name")),
 		jen.If(jen.Len(jen.Id("f").Dot("Args")).Op(">").Lit(0)).Block(
 			jen.Id("b").Dot("WriteString").Call(jen.Lit("(")),
 			jen.Id("i").Op(":=").Lit(0),
-			jen.For(jen.Id("k").Op(",").Op("_").Op(":=").Range().Op(jen.Id("f").Dot("Args").GoString())).Block(
+			jen.Id("var").Id("args").Index().Id("string"),
+			jen.For(jen.Id("k").Op(",").Id("_").Op(":=").Range().Op(jen.Id("f").Dot("Args").GoString())).Block(
+				jen.Id("args").Op("=").Append(jen.Id("args").Op(",").Id("k")),
+			),
+			jen.Qual("sort", "Strings").Call(jen.Id("args")),
+			jen.For(jen.Id("_").Op(",").Op("k").Op(":=").Range().Op(jen.Id("args").GoString())).Block(
 				jen.If(jen.Id("i").Op(">").Lit(0)).Block(jen.Id("b").Dot("WriteString").Call(jen.Lit(", "))),
-				jen.Id("varName").Op(":=").Id("nameMap").Index(jen.Id("f").Dot("Name").Op("+").Lit(".").Op("+").Id("k")),
-				jen.If(jen.Id("varName").Op("==").Lit("")).Block(jen.Id("varName").Op("=").Id("f").Dot("Name").Op("+").Lit("_").Op("+").Id("k")),
+				jen.Op("*").Id("counter").Op("++"),
+				jen.Id("varName").Op(":=").Qual("fmt", "Sprintf").Call(jen.Lit("%v_%v"), jen.Id("k"), jen.Op("*").Id("counter")),
 				jen.Id("b").Dot("WriteString").Call(jen.Id("k").Op("+").Lit(":$").Op("+").Id("varName")),
 				jen.Id("i").Op("++"),
 			),
@@ -631,7 +645,7 @@ func genFieldHelpers(f *jen.File) {
 		),
 		jen.Id("b").Dot("WriteString").Call(jen.Lit(" {\n")),
 		jen.For(jen.Id("_").Op(",").Id("c").Op(":=").Range().Op(jen.Id("f").Dot("Children").GoString())).Block(
-			jen.Id("b").Dot("WriteString").Call(jen.Id("fieldToGraphQL").Call(jen.Id("c"), jen.Id("indent").Op("+").Lit("  "), jen.Id("nameMap"))),
+			jen.Id("b").Dot("WriteString").Call(jen.Id("fieldToGraphQL").Call(jen.Id("c"), jen.Id("indent").Op("+").Lit("  "), jen.Id("nameMap"), jen.Id("counter"))),
 		),
 		jen.Id("b").Dot("WriteString").Call(jen.Id("indent").Op("+").Lit("}\n")),
 		jen.Return(jen.Id("b").Dot("String").Call()),
